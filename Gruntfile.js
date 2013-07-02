@@ -42,13 +42,18 @@ module.exports = function (grunt) {
                 "www/**/*.js",
                 "!www/vendor/**/*.js"
             ]
+        },
+
+        nodeunit : {
+            all : ["test/test-*.js"]
         }
                 
     });
 
     grunt.loadNpmTasks("grunt-contrib-jshint");
+    grunt.loadNpmTasks("grunt-contrib-nodeunit");
 
-    grunt.registerTask("default", ["jshint"]);
+    grunt.registerTask("default", ["jshint", "nodeunit"]);
         
     grunt.registerTask("package", "Create distributable Generator package with plugins", function () {
         grunt.log.writeln("Not yet implemented");
