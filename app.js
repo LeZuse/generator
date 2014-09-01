@@ -23,59 +23,59 @@
 
 (function () {
     "use strict";
+
+    var utils = require("./lib/utils");
+
+    var PLUGIN_KEY_PREFIX = "PLUGIN-";
+
+    // On Windows, the bullet character is sometimes replaced with the bell character BEL (0x07).
+    // This causes Windows to make a beeping noise every time • is printed to the console.
+    // Use · instead. This needs to happen before adding stdlog to not affect the log files.
+    if (process.platform === "win32") {
+        utils.filterWriteStream(process.stdout, utils.replaceBullet);
+        utils.filterWriteStream(process.stderr, utils.replaceBullet);
+    }
+    
+    require("./lib/stdlog").setup({
+        vendor:      "Adobe",
+        application: "Adobe Photoshop CC 2014",
+        module:      "Generator"
+    });
+
+
     var util = require("util"),
+        config = require("./lib/config").getConfig(),
         generator = require("./lib/generator"),
-        logger = require("./lib/logger"),
         Q = require("q"),
         optimist = require("optimist");
 
-    require("./lib/stdlog");
-
-    var HEARTBEAT_DELAY = 1000, // one second
-        heartbeatCount = 0;
-    
-    var DEBUG_ON_LAUNCH = false,
-        LOG_FILENAME = null;
 
     var optionParser = optimist["default"]({
-        "r" : "independent",
-        "m" : null,
         "p" : 49494,
         "h" : "localhost",
         "P" : "password",
         "i" : null,
         "o" : null,
-        "f" : null,
-        "l" : 49495,
-        "n" : null
+        "f" : null
     });
     
     var argv = optionParser
         .usage("Run generator service.\nUsage: $0")
         .describe({
-            "r": "launch reason, one of: independent, menu, metadata, alwayson",
-            "m": "menu ID of action that should be executed immediately after startup",
             "p": "Photoshop server port",
             "h": "Photoshop server host",
             "P": "Photoshop server password",
             "i": "file descriptor of input pipe",
             "o": "file descriptor of output pipe",
             "f": "folder to search for plugins (can be used multiple times)",
-            "l": "logger server port",
-            "n": "filename to write the log (specifying -n witout filename uses stdout)",
-            "debuglaunch": "start debugger instead of initializing (call start() to init)",
             "help": "display help message"
         }).alias({
-            "r": "launchreason",
-            "m": "menu",
             "p": "port",
             "h": "host",
             "P": "password",
             "i": "input",
             "o": "output",
-            "f": "pluginfolder",
-            "l": "loggerport",
-            "n": "loggerfile"
+            "f": "pluginfolder"
         }).argv;
     
     if (argv.help) {
@@ -90,38 +90,116 @@
         console.error("Exiting with code " + exitCode + ": " + reason);
         process.exit(exitCode);
     }
-    
-    function startLogServer() {
-        var deferred = Q.defer();
-        logger.startServer(argv.loggerport, "localhost", function (err, address) {
-            if (err) {
-                deferred.reject(err);
-            } else {
-                deferred.resolve(address);
+
+    function scanPluginDirectories(folders, theGenerator) {
+        var allPlugins = [];
+
+        function listPluginsInDirectory(directory) {
+
+            function verifyPluginAtPath(absolutePath) {
+                var result = null,
+                    metadata = null,
+                    compatibility = null;
+
+                try {
+                    metadata = theGenerator.getPluginMetadata(absolutePath);
+                    compatibility = theGenerator.checkPluginCompatibility(metadata);
+                    if (compatibility.compatible) {
+                        result = {
+                            path: absolutePath,
+                            metadata: metadata
+                        };
+                    }
+
+                    if (compatibility.message) {
+                        console.warn("Potential problem with plugin at '" + absolutePath +
+                            "': " + compatibility.message);
+                    }
+                } catch (metadataLoadError) {
+                    // Do nothing
+                }
+                return result;
+            }
+
+            // relative paths are resolved relative to the current working directory
+            var resolve = require("path").resolve,
+                fs = require("fs"),
+                absolutePath = resolve(process.cwd(), directory),
+                plugins = [],
+                potentialPlugin = null;
+            
+            if (!fs.statSync(absolutePath).isDirectory()) {
+                console.error("Error: specified plugin path '%s' is not a directory", absolutePath);
+                return plugins;
+            }
+
+            // First, try treating the directory as a plugin
+
+            potentialPlugin = verifyPluginAtPath(absolutePath);
+            if (potentialPlugin) {
+                plugins.push(potentialPlugin);
+            }
+
+            // If we didn't find a compatible plugin at the root level,
+            // then scan one level deep for plugins
+            if (plugins.length === 0) {
+                fs.readdirSync(absolutePath)
+                    .map(function (child) {
+                        return resolve(absolutePath, child);
+                    })
+                    .filter(function (absoluteChildPath) {
+                        return fs.statSync(absoluteChildPath).isDirectory();
+                    })
+                    .forEach(function (absolutePluginPath) {
+                        potentialPlugin = verifyPluginAtPath(absolutePluginPath);
+                        if (potentialPlugin) {
+                            plugins.push(potentialPlugin);
+                        }
+                    });
+            }
+
+            return plugins;
+        }
+
+        if (!util.isArray(folders)) {
+            folders = [folders];
+        }
+
+        folders.forEach(function (f) {
+            try {
+                var currentPluginCount = allPlugins.length;
+                allPlugins = allPlugins.concat(listPluginsInDirectory(f));
+                if (currentPluginCount === allPlugins.length) {
+                    // No plugins found in this directory
+                    console.warn("No viable plugins were found in '" + f + "'");
+                }
+            } catch (e) {
+                console.error("Error processing plugin directory %s\n", f, e);
             }
         });
-        return deferred.promise;
+
+        return allPlugins;
     }
-    
+
     function setupGenerator() {
         var deferred = Q.defer();
         var theGenerator = generator.createGenerator();
 
-        theGenerator.subscribe("#", function (data, envelope) {
-            // envelope.topic *should* have the schema source.type.message. For example
-            // something like "photoshop.error.authenticationError". However, by
-            // splitting, then shifting, then joining the remainder, we will always
-            // get all the data into the log in some form if the schema isn't followed.
-            //
-            // Note that shifting and joining do not throw errors on empty arrays, they
-            // just produce "undefined" and empty strings, which is what we'd want in the
-            // log anyway if the schema wasn't followed properly.
-            var splitTopic = envelope.topic.split(".");
-            var source = envelope.channel + "." + splitTopic.shift();
-            var type = splitTopic.shift();
-            var message = splitTopic.join(".");
+        // NOTE: It *should* be the case that node automatically cleans up all pipes/sockets
+        // on exit. However, on node v0.10.15 mac 64-bit there seems to be a bug where
+        // the native-side process exit hangs if node is blocked on the read of a pipe.
+        // This meant that if Generator had an unhandled exception after starting to read
+        // from PS's pipe, the node process wouldn't fully exit until PS closed the pipe.
+        process.on("exit", function () {
+            if (theGenerator) {
+                theGenerator.shutdown();
+            }
+        });
 
-            logger.log(type, source, message, data);
+        theGenerator.on("close", function () {
+            setTimeout(function () {
+                stop(0, "Generator close event");
+            }, 1000);
         });
 
         var options = {};
@@ -132,27 +210,66 @@
             options.password = null; // No encryption over pipes
         } else if (typeof argv.port === "number" && argv.host && argv.password) {
             options.port = argv.port;
-            options.host = argv.host;
+            options.hostname = argv.host;
             options.password = argv.password;
         }
         
-        theGenerator.start(options).then(
+        options.config = config;
+
+        theGenerator.start(options).done(
             function () {
-                logger.log("init", "app", "Generator started!", null);
-                
-                var folders = argv.pluginfolder;
-                if (folders) {
-                    if (!util.isArray(folders)) {
-                        folders = [folders];
+                var semver = require("semver"),
+                    totalPluginCount = 0,
+                    pluginMap = {},
+                    plugins = scanPluginDirectories(argv.pluginfolder, theGenerator);
+
+                // Ensure all plugins have a valid semver, then put them in to a map
+                // keyed on plugin name
+                plugins.forEach(function (p) {
+                    if (!semver.valid(p.metadata.version)) {
+                        p.metadata.version = "0.0.0";
                     }
-                    folders.forEach(function (f) {
-                        theGenerator.loadAllPluginsInDirectory(f);
+                    if (!pluginMap[PLUGIN_KEY_PREFIX + p.metadata.name]) {
+                        pluginMap[PLUGIN_KEY_PREFIX + p.metadata.name] = [];
+                    }
+                    pluginMap[PLUGIN_KEY_PREFIX + p.metadata.name].push(p);
+                });
+
+                // For each unique plugin name, try to load a plugin with that name
+                // in decending order of version
+                Object.keys(pluginMap).forEach(function (pluginSetKey) {
+                    var pluginSet = pluginMap[pluginSetKey],
+                        i,
+                        loaded = false;
+
+                    pluginSet.sort(function (a, b) {
+                        return semver.rcompare(a.metadata.version, b.metadata.version);
                     });
+
+                    for (i = 0; i < pluginSet.length; i++) {
+                        try {
+                            theGenerator.loadPlugin(pluginSet[i].path);
+                            loaded = true;
+                        } catch (loadingException) {
+                            console.error("Unable to load plugin at '" + pluginSet[i].path + "': " +
+                                loadingException.message);
+                        }
+
+                        if (loaded) {
+                            totalPluginCount++;
+                            break;
+                        }
+                    }
+
+                });
+
+
+                if (totalPluginCount === 0) {
+                    // Without any plugins, Generator will never do anything. So, we exit.
+                    deferred.reject("Generator requires at least one plugin to function, zero were loaded.");
+                } else {
+                    deferred.resolve(theGenerator);
                 }
-
-                theGenerator.subscribeToEvents();
-
-                deferred.resolve(theGenerator);
             },
             function (err) {
                 deferred.reject(err);
@@ -163,72 +280,12 @@
     }
     
     function init() {
-
-        // Log to file if specified
-        var logFilename = LOG_FILENAME || argv.loggerfile;
-        if (logFilename) {
-            logger.setLogFilename(logFilename);
-        }
-
-        // Record command line arguments
-        logger.log("init", "app", "node version", process.versions);
-        logger.log("init", "app", "unparsed command line", process.argv);
-        logger.log("init", "app", "parsed command line", argv);
-
-        // Start async process to launch log server
-        startLogServer().done(
-            function (address) {
-                console.log("Log server running at http://localhost:" + address.port);
-            },
-            function (err) {
-                console.error("Error starting log server:", err);
-            }
-        );
-                              
         // Start async process to initialize generator
-        setupGenerator().done(
-            function () {
-                console.log("Generator initialized");
-            },
+        setupGenerator().fail(
             function (err) {
-                stop(-3, "generator failed to initialize: " + err);
+                stop(-3, "Generator failed to initialize: " + err);
             }
         );
-
-        // Routinely check if stdout is closed. Stdout will close when our
-        // parent process closes (either expectedly or unexpectedly) so this
-        // is our signal to shutdown to prevent process abandonment.
-        process.stdout.on("end", function () {
-            stop(-2, "received end on stdout");
-        });
-
-        process.stdout.on("error", function () {
-            stop(-2, "async error writing to stdout");
-        });
-
-        if (!process.stdout.isTTY) {
-            // We need to continually ping because that's the only way to actually
-            // check if the pipe is closed in a robust way (writable may only get
-            // set to false after trying to write a ping to a closed pipe).
-            //
-            // As an example, on OS X, doing "node app.js | cat" and then killing
-            // the cat process with "kill -9" does *not* generate an end event
-            // immediately. However, writing to the pipe generates an error event.
-            setInterval(function () {
-                if (!process.stdout.writable) {
-                    // If stdout closes, our parent process has terminated or
-                    // has explicitly closed it. Either way, we should exit.
-                    stop(-2, "stdout closed");
-                } else {
-                    try {
-                        process.stdout.write("PING " + (heartbeatCount++) + "\n");
-                    } catch (e) {
-                        stop(-2, "sync error writing to stdout");
-                    }
-                }
-            }, HEARTBEAT_DELAY);
-        }
-
     }
 
     process.on("uncaughtException", function (err) {
@@ -240,30 +297,9 @@
             }
         }
 
-        stop(-1, "uncaught exception" + (err ? (": " + err.message) : "undefined"));
+        stop(-1, "Uncaught exception" + (err ? (": " + err.message) : "undefined"));
     });
 
-    if (DEBUG_ON_LAUNCH || argv.debuglaunch) {
-        // Set a timer that will keep our process from exiting.
-        var debugStartTimeout = setInterval(function () {
-            console.error("hit debugger init timeout");
-        }, 100000);
-
-        // Put a function in the global namespace that runs "init". Needs
-        // to call init on the event loop so that it can be debugged (code that
-        // runs from the REPL/console cannot be debugged).
-        global.start = function () {
-            clearTimeout(debugStartTimeout);
-            process.nextTick(function () {
-                init();
-            });
-        };
-
-        // Start the debugger
-        process._debugProcess(process.pid);
-    } else {
-        // Not debugging on launch, so start normally
-        init();
-    }
+    init();
 
 }());

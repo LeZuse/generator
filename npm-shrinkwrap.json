@@ -1,0 +1,40 @@
+{
+  "name": "generator-core",
+  "version": "3.2.0",
+  "dependencies": {
+    "optimist": {
+      "version": "0.6.1",
+      "from": "optimist@~0.6",
+      "dependencies": {
+        "wordwrap": {
+          "version": "0.0.2",
+          "from": "wordwrap@~0.0.2"
+        },
+        "minimist": {
+          "version": "0.0.10",
+          "from": "minimist@~0.0.1"
+        }
+      }
+    },
+    "q": {
+      "version": "1.0.1",
+      "from": "q@~1.0"
+    },
+    "semver": {
+      "version": "2.3.2",
+      "from": "semver@~2.3"
+    },
+    "ws": {
+      "version": "0.4.31",
+      "from": "ws@git+https://github.com/adobe-photoshop/ws.git#v0.4.31-no-native",
+      "resolved": "git+https://github.com/adobe-photoshop/ws.git#f89590b37ef8ba322636e8ef8187252c06eec143",
+      "dependencies": {
+        "options": {
+          "version": "0.0.5",
+          "from": "options@0.0.5",
+          "resolved": "https://registry.npmjs.org/options/-/options-0.0.5.tgz"
+        }
+      }
+    }
+  }
+}
